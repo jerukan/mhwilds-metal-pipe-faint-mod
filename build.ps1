@@ -2,13 +2,19 @@
   Builds the Metal Pipe faint-sound mod for Monster Hunter Wilds.
 
   Replaces voice lines in hunter voice banks (natives/STM/Sound/Wwise/*.sbnk.1.X64.En).
-  Which media IDs to replace comes from every voiceline-ids-*.txt next to this script, in the form:
+  Which media IDs to replace comes from voiceline-ids-*.txt lists next to this script, in the form:
        Player_ActVoice_M01.sbnk.1.X64.En
        - 3919603
        - 30638291
   i.e. a bank file name line followed by "- <id>" lines. Lists for the same bank are merged.
     voiceline-ids-faint.txt    multiplayer faint lines (from the "Fah Faint Chat Team EN" mod)
     voiceline-ids-heavyhit.txt heavy-hit grunts
+
+  Output is a Fluffy Mod Manager bundle with one variant per entry in $Variants (below):
+    Metal Pipe Faint (Faint + Heavy Hit)   faint + heavy-hit lists
+    Metal Pipe Faint (Faint Only)          faint list only
+  Each variant gets the root modinfo.ini with "name" suffixed by the variant label, an optional
+  description override, and NameAsBundle=<root name> so Fluffy groups them as one mod.
 
   A .sbnk here is a plain Wwise .bnk: BKHD (header) + DIDX (id/offset/size table) + DATA (concatenated .wem).
   We decode the mp3 with ffmpeg, wrap it in a Wwise PCM .wem header (stereo, same layout as the
@@ -24,7 +30,7 @@
                                                        [-GainDb <double>] [-OutDir <path>]
 
   Parameters (all optional):
-    -Mp3         Sound to insert. Default: examples\metal pipe falling sound effect [iDLmYZ5HqgM].mp3
+    -Mp3         Sound to insert. Default: metal pipe falling sound effect [iDLmYZ5HqgM].mp3
     -RefDir      Folder holding the vanilla .sbnk banks. Default: reference\natives\STM\Sound\Wwise
     -SampleRate  Output sample rate in Hz. Default: 48000 (matches the game's voice banks)
     -GainDb      Volume change in dB, e.g. 6 = louder, -6 = quieter. Default: 0
@@ -35,7 +41,10 @@
     powershell -ExecutionPolicy Bypass -File build.ps1 -GainDb -4
     powershell -ExecutionPolicy Bypass -File build.ps1 -Mp3 "C:\sounds\bonk.mp3" -OutDir "C:\mods\Bonk Faint"
 
-  Output: <OutDir>\modinfo.ini + <OutDir>\natives\STM\Sound\Wwise\<bank>, zipped for Fluffy Mod Manager.
+  Also requires modinfo.ini and cover.jpg in the project root; both are copied into the mod as-is.
+
+  Output: <OutDir>\<OutDir name> (<variant>)\{modinfo.ini, cover.jpg, natives\STM\Sound\Wwise\<bank>}
+          for each variant, zipped as <OutDir>.zip for Fluffy Mod Manager.
 #>
 param(
     [string]$Mp3      = "$PSScriptRoot\metal pipe falling sound effect [iDLmYZ5HqgM].mp3",
@@ -106,50 +115,83 @@ function Rebuild-Bank([string]$basePath, [uint32[]]$ids, [byte[]]$wem) {
     $w.Flush(); return ,$ms.ToArray()
 }
 
-# ---------- targets ----------
+# ---------- variants ----------
+# Each variant becomes its own mod folder inside the bundle. Description = $null keeps the root one.
+$Variants = @(
+    @{ Label = 'Faint + Heavy Hit'; Lists = 'voiceline-ids-faint.txt', 'voiceline-ids-heavyhit.txt'; Description = $null }
+    @{ Label = 'Faint Only';        Lists = 'voiceline-ids-faint.txt';                               Description = 'Replaces the faint voice lines (English) with the metal pipe falling sound effect' }
+)
+
+# Parse ID lists: a bank file name line, then "- <id>" lines. Same-bank lists merge.
+function Read-IdLists([string[]]$files) {
+    $bankIds = [ordered]@{}
+    foreach ($f in $files) {
+        $path = Join-Path $PSScriptRoot $f
+        if (-not (Test-Path -LiteralPath $path)) { throw "Missing ID list $f" }
+        $bank = $null
+        foreach ($line in Get-Content -LiteralPath $path) {
+            $line = $line.Trim()
+            if ($line -eq '' -or $line.StartsWith('#')) { continue }
+            if ($line -match '^-\s*(\d+)$') {
+                if (-not $bank) { throw "${f}: ID '$line' appears before any bank name" }
+                $bankIds[$bank].Add([uint32]$Matches[1]) | Out-Null
+            } elseif ($line -match '^[\w.]+$') {
+                $bank = $line
+                if (-not $bankIds.Contains($bank)) { $bankIds[$bank] = New-Object 'System.Collections.Generic.HashSet[uint32]' }
+            } else { throw "${f}: can't parse line '$line'" }
+        }
+    }
+    return $bankIds
+}
+
+# Root modinfo.ini is the template for every variant.
+$modinfoPath = Join-Path $PSScriptRoot 'modinfo.ini'
+$coverPath   = Join-Path $PSScriptRoot 'cover.jpg'
+foreach ($p in $modinfoPath, $coverPath) { if (-not (Test-Path -LiteralPath $p)) { throw "Missing $p" } }
+$modinfo = @(Get-Content -LiteralPath $modinfoPath | Where-Object { $_ -notmatch '^\s*NameAsBundle\s*=' })
+$nameLine = $modinfo | Where-Object { $_ -match '^\s*name\s*=' } | Select-Object -First 1
+if (-not $nameLine) { throw "modinfo.ini has no name= line" }
+$BundleName = ($nameLine -split '=', 2)[1].Trim()
+
 $wem = New-Wem $Mp3
 
-# Read every voiceline-ids-*.txt: a bank file name line, then "- <id>" lines. Same-bank lists merge.
-$BankIds = [ordered]@{}
-foreach ($list in Get-ChildItem $PSScriptRoot -Filter 'voiceline-ids-*.txt' | Sort-Object Name) {
-    $bank = $null; $n = 0
-    foreach ($line in Get-Content $list.FullName) {
-        $line = $line.Trim()
-        if ($line -eq '' -or $line.StartsWith('#')) { continue }
-        if ($line -match '^-\s*(\d+)$') {
-            if (-not $bank) { throw "$($list.Name): ID '$line' appears before any bank name" }
-            $BankIds[$bank].Add([uint32]$Matches[1]) | Out-Null; $n++
-        } elseif ($line -match '^[\w.]+$') {
-            $bank = $line
-            if (-not $BankIds.Contains($bank)) { $BankIds[$bank] = New-Object 'System.Collections.Generic.HashSet[uint32]' }
-        } else { throw "$($list.Name): can't parse line '$line'" }
-    }
-    Write-Host ("Loaded {0}: {1} IDs" -f $list.Name, $n)
-}
-if ($BankIds.Count -eq 0) { throw "No voiceline-ids-*.txt lists found next to build.ps1" }
-$Jobs = @(foreach ($name in $BankIds.Keys) {
-    @{ Name = $name; Ids = [uint32[]]@($BankIds[$name]); Fallback = $FahDir; FallbackLabel = 'Fah mod' }
-})
-
-# ---------- write Fluffy Mod Manager layout ----------
+# ---------- write Fluffy Mod Manager bundle ----------
 if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
-$wwiseDir = Join-Path $OutDir 'natives\STM\Sound\Wwise'
-New-Item -ItemType Directory -Force $wwiseDir | Out-Null
+$folderBase = Split-Path $OutDir -Leaf
+$bankCache = @{}   # identical bank + ID set across variants is only rebuilt once
 
-foreach ($job in $Jobs) {
-    $base = Join-Path $RefDir $job.Name; $src = 'vanilla'
-    if (-not (Test-Path -LiteralPath $base)) { $base = Join-Path $job.Fallback $job.Name; $src = $job.FallbackLabel }
-    if (-not (Test-Path -LiteralPath $base)) { throw "No base bank found for $($job.Name) (put the vanilla file in $RefDir)" }
-    $bank = Rebuild-Bank $base $job.Ids $wem
-    [IO.File]::WriteAllBytes((Join-Path $wwiseDir $job.Name), $bank)
-    Write-Host ("  {0}: replaced {1} entries (base: {2})" -f $job.Name, $job.Ids.Count, $src)
+foreach ($v in $Variants) {
+    $varDir = Join-Path $OutDir "$folderBase ($($v.Label))"
+    $wwiseDir = Join-Path $varDir 'natives\STM\Sound\Wwise'
+    New-Item -ItemType Directory -Force $wwiseDir | Out-Null
+    Write-Host "[$($v.Label)] lists: $($v.Lists -join ', ')"
+
+    $bankIds = Read-IdLists $v.Lists
+    foreach ($name in $bankIds.Keys) {
+        $ids = [uint32[]]@($bankIds[$name] | Sort-Object)
+        $key = "$name|$($ids -join ',')"
+        if (-not $bankCache.ContainsKey($key)) {
+            $base = Join-Path $RefDir $name; $src = 'vanilla'
+            if (-not (Test-Path -LiteralPath $base)) { $base = Join-Path $FahDir $name; $src = 'Fah mod' }
+            if (-not (Test-Path -LiteralPath $base)) { throw "No base bank found for $name (put the vanilla file in $RefDir)" }
+            $bankCache[$key] = Rebuild-Bank $base $ids $wem
+            Write-Host ("  {0}: replaced {1} entries (base: {2})" -f $name, $ids.Count, $src)
+        } else {
+            Write-Host ("  {0}: replaced {1} entries (reused)" -f $name, $ids.Count)
+        }
+        [IO.File]::WriteAllBytes((Join-Path $wwiseDir $name), $bankCache[$key])
+    }
+
+    # modinfo.ini: root template with variant name, optional description, and NameAsBundle.
+    $lines = foreach ($line in $modinfo) {
+        if ($line -match '^\s*name\s*=') { "name=$BundleName ($($v.Label))" }
+        elseif ($v.Description -and $line -match '^\s*description\s*=') { "description=$($v.Description)" }
+        else { $line }
+    }
+    $lines += "NameAsBundle=$BundleName"
+    $lines | Set-Content -Encoding ascii (Join-Path $varDir 'modinfo.ini')
+    Copy-Item -LiteralPath $coverPath -Destination $varDir
 }
-
-@"
-name=Metal Pipe Faint
-version=v1.0
-description=Replaces the faint and heavy-hit voice lines (English) with the metal pipe falling sound effect
-"@ | Set-Content -Encoding ascii (Join-Path $OutDir 'modinfo.ini')
 
 # Build the zip by hand: PS 5.1's Compress-Archive writes backslash paths and bare directory
 # entries ("natives\"), which Fluffy Mod Manager tries to copy as files and fails on.
