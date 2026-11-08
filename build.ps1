@@ -38,7 +38,7 @@
   Output: <OutDir>\modinfo.ini + <OutDir>\natives\STM\Sound\Wwise\<bank>, zipped for Fluffy Mod Manager.
 #>
 param(
-    [string]$Mp3      = "$PSScriptRoot\examples\metal pipe falling sound effect [iDLmYZ5HqgM].mp3",
+    [string]$Mp3      = "$PSScriptRoot\metal pipe falling sound effect [iDLmYZ5HqgM].mp3",
     [string]$RefDir   = "$PSScriptRoot\reference\natives\STM\Sound\Wwise",
     [int]$SampleRate  = 48000,
     [double]$GainDb   = 0,
@@ -46,7 +46,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ascii = [Text.Encoding]::ASCII
-$FahDir = "$PSScriptRoot\examples\Fah Faint Chat Team EN-4030-1-01-1772124062\natives\STM\Sound\Wwise"
+$FahDir = "$PSScriptRoot\reference\natives\STM\Sound\Wwise"
 
 function U32([byte[]]$b, [int]$o) { [BitConverter]::ToUInt32($b, $o) }
 
